@@ -1,0 +1,119 @@
+service: sentron-asset-ingest
+
+provider:
+  name: aws
+  runtime: nodejs12.x
+  timeout: 20
+  stage: ${opt:stage, 'dev'}
+  region: eu-west-1
+  environment:
+    S3_BUCKET: sentron-asset-ingest-${self:provider.stage}
+    MAX_FILE_SIZE: 2097152
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - s3:PutObject
+        - s3:GetObject
+        - s3:ListBucket
+      Resource:
+        - arn:aws:s3:::sentron-asset-ingest-${self:provider.stage}/*
+        - arn:aws:s3:::sentron-asset-ingest-${self:provider.stage}
+plugins:
+  - serverless-plugin-typescript
+functions:
+  ingestAsset:
+    handler: handlers/ingest-asset.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [IngestAssetQueue, Arn]
+          batchSize: 1
+resources:
+  Resources:
+    AssetBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: sentron-asset-ingest-${self:provider.stage}
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+
+    ImageDiscoveredTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: image-discovered-${self:provider.stage}
+
+    StylesheetDiscoveredTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: stylesheet-discovered-${self:provider.stage}
+
+    IngestAssetQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ingest-asset-${self:provider.stage}
+        VisibilityTimeout: 120
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt: [IngestAssetDLQ, Arn]
+          maxReceiveCount: 5
+
+    IngestAssetDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: ingest-asset-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600 # 14 days
+
+    ImageDiscoveredSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: ImageDiscoveredTopic
+        Endpoint:
+          Fn::GetAtt: [IngestAssetQueue, Arn]
+        Protocol: sqs
+        RawMessageDelivery: true
+
+    StylesheetDiscoveredSubscription:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: StylesheetDiscoveredTopic
+        Endpoint:
+          Fn::GetAtt: [IngestAssetQueue, Arn]
+        Protocol: sqs
+        RawMessageDelivery: true
+
+    IngestAssetQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        PolicyDocument:
+          Version: "2012-10-17"
+          Id: IngestAssetQueuePolicy
+          Statement:
+            - Sid: AllowImageDiscovered
+              Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action:
+                - sqs:SendMessage
+              Resource: "*"
+              Condition:
+                ArnEquals:
+                  aws:SourceArn:
+                    Ref: ImageDiscoveredTopic
+            - Sid: AllowStylesheetDiscoveredTopic
+              Effect: Allow
+              Principal:
+                Service: sns.amazonaws.com
+              Action:
+                - sqs:SendMessage
+              Resource: "*"
+              Condition:
+                ArnEquals:
+                  aws:SourceArn:
+                    Ref: StylesheetDiscoveredTopic
+        Queues:
+          - Ref: IngestAssetQueue
